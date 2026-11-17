@@ -53,7 +53,7 @@ psql inventory -c "SELECT * FROM items;"
 ## Launch
 
 ```bash
-go run .
+go run main.go
 ```
 
 The API is served at http://localhost:8080. Set `PORT` in `.env` to use a different port.
