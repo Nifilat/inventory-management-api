@@ -22,7 +22,6 @@ import (
 // ============================================================
 
 // Item is a single inventory record, mapped to the "items" table by GORM.
-// The ID is a UUID generated in createItem; binding tags validate request bodies.
 type Item struct {
 	ID    string  `json:"id" gorm:"primaryKey"`
 	Name  string  `json:"name" gorm:"not null" binding:"required"`
@@ -34,7 +33,6 @@ type Item struct {
 // DATABASE
 // ============================================================
 
-// db is the shared GORM handle used by the handlers.
 var db *gorm.DB
 
 // initDatabase connects to PostgreSQL, migrates the schema and seeds initial data.
@@ -100,6 +98,16 @@ func seedDatabase() {
 // One function per endpoint (rubric). All use GORM via db and return JSON.
 // ============================================================
 
+// cache holds items fetched by getItem; update and delete must invalidate their entry.
+var cache = make(map[string]Item)
+var cacheMutex sync.RWMutex
+
+func invalidateCache(id string) {
+	cacheMutex.Lock()
+	delete(cache, id)
+	cacheMutex.Unlock()
+}
+
 // findItem loads an item by ID. On failure it writes the error response
 // (404 if not found, 500 for any other database error) and returns false.
 func findItem(c *gin.Context, id string) (Item, bool) {
@@ -122,8 +130,6 @@ const maxLimit = 100
 var sortableFields = map[string]bool{"name": true, "stock": true, "price": true}
 
 // getItems handles GET /inventory
-// Query params: limit (1-100, default 10), offset, sort_by (name|stock|price),
-// order (asc|desc, case-insensitive), name (partial match), min_stock.
 // Invalid values return 400.
 func getItems(c *gin.Context) {
 	limitParam := c.DefaultQuery("limit", "10")
@@ -185,10 +191,23 @@ func getItems(c *gin.Context) {
 
 // getItem handles GET /inventory/:id (200, or 404 if missing)
 func getItem(c *gin.Context) {
-	item, ok := findItem(c, c.Param("id"))
+	id := c.Param("id")
+
+	cacheMutex.RLock()
+	if item, found := cache[id]; found {
+		cacheMutex.RUnlock()
+		c.JSON(http.StatusOK, gin.H{"item": item})
+		return
+	}
+	cacheMutex.RUnlock()
+
+	item, ok := findItem(c, id)
 	if !ok {
 		return
 	}
+	cacheMutex.Lock()
+	cache[id] = item
+	cacheMutex.Unlock()
 	c.JSON(http.StatusOK, gin.H{"item": item})
 }
 
@@ -226,6 +245,7 @@ func updateItem(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update item"})
 		return
 	}
+	invalidateCache(item.ID)
 	c.JSON(http.StatusOK, gin.H{"item": item})
 }
 
@@ -239,6 +259,7 @@ func deleteItem(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete item"})
 		return
 	}
+	invalidateCache(item.ID)
 	c.JSON(http.StatusOK, gin.H{"message": "Item deleted successfully"})
 }
 
