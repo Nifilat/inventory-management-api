@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -113,19 +115,72 @@ func findItem(c *gin.Context, id string) (Item, bool) {
 	return item, true
 }
 
+// maxLimit caps how many items one page can return.
+const maxLimit = 100
+
+// sortableFields are the columns clients may sort by.
+var sortableFields = map[string]bool{"name": true, "stock": true, "price": true}
+
 // getItems handles GET /inventory
-//
-// TODO(6): Pagination: read ?limit= and ?offset= (defaults and a max limit), apply Limit/Offset.
-// TODO(6): Sorting: read ?sort_by= (name|stock|price, whitelist it!) and ?order= (asc|desc), apply Order().
-// TODO(6): Filtering: ?name= (partial, case-insensitive, e.g. ILIKE) and ?min_stock= (stock >= n).
-// TODO(6): Return 400 for invalid query params (non-numeric limit, unknown sort field).
+// Query params: limit (1-100, default 10), offset, sort_by (name|stock|price),
+// order (asc|desc, case-insensitive), name (partial match), min_stock.
+// Invalid values return 400.
 func getItems(c *gin.Context) {
+	limitParam := c.DefaultQuery("limit", "10")
+	offsetParam := c.DefaultQuery("offset", "0")
+
+	limit, err := strconv.Atoi(limitParam)
+	if err != nil || limit <= 0 || limit > maxLimit {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid limit parameter; use 1 to " + strconv.Itoa(maxLimit)})
+		return
+	}
+
+	offset, err := strconv.Atoi(offsetParam)
+	if err != nil || offset < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid offset parameter"})
+		return
+	}
+
+	query := db.Model(&Item{})
+
+	if name := c.Query("name"); name != "" {
+		query = query.Where("name ILIKE ?", "%"+name+"%")
+	}
+	if raw := c.Query("min_stock"); raw != "" {
+		minStock, err := strconv.Atoi(raw)
+		if err != nil || minStock < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid min_stock parameter"})
+			return
+		}
+		query = query.Where("stock >= ?", minStock)
+	}
+
+	// sort_by is whitelisted: it is concatenated into SQL, so it must never be raw user input.
+	sortBy := c.DefaultQuery("sort_by", "name")
+	if !sortableFields[sortBy] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid sort_by value. Use 'name', 'stock' or 'price'"})
+		return
+	}
+	order := strings.ToUpper(c.DefaultQuery("order", "ASC"))
+	if order != "ASC" && order != "DESC" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid order value. Use 'asc' or 'desc'"})
+		return
+	}
+	// "id" as a tiebreaker keeps page boundaries stable when sort values are equal.
+	query = query.Order(sortBy + " " + order).Order("id")
+
 	var items []Item
-	if err := db.Find(&items).Error; err != nil {
+	if err := query.Limit(limit).Offset(offset).Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch items"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	c.JSON(http.StatusOK, gin.H{
+		"items": items,
+		"metadata": gin.H{
+			"limit":  limit,
+			"offset": offset,
+		},
+	})
 }
 
 // getItem handles GET /inventory/:id (200, or 404 if missing)
