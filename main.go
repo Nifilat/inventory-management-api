@@ -39,8 +39,6 @@ var db *gorm.DB
 
 // initDatabase connects to PostgreSQL, migrates the schema and seeds initial data.
 // The connection string (dsn) comes from DATABASE_DSN in .env.
-//
-// TODO(1): Handle the AutoMigrate error instead of ignoring it.
 func initDatabase() {
 	dsn := os.Getenv("DATABASE_DSN")
 	if dsn == "" {
@@ -53,7 +51,9 @@ func initDatabase() {
 		log.Fatal("Failed to connect to the database! ", err)
 	}
 
-	db.AutoMigrate(&Item{})
+	if err := db.AutoMigrate(&Item{}); err != nil {
+		log.Fatal("Failed to migrate the database! ", err)
+	}
 	seedDatabase()
 }
 
@@ -291,8 +291,6 @@ func (tb *TokenBucket) Allow() bool {
 }
 
 // rateLimiter limits requests with one shared bucket: burst of 5, then 1 request per second.
-//
-// TODO(7): Test by firing >5 quick requests (curl loop) and confirm 429s, then recovery.
 func rateLimiter() gin.HandlerFunc {
 	limiter := NewTokenBucket(5, time.Second)
 	return func(c *gin.Context) {
