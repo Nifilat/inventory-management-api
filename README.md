@@ -64,7 +64,7 @@ Rate limit: 1 request/second with a burst of 5 (HTTP 429 when exceeded). TODO(5)
 2. `Item` struct tags + validation
 3. ~~Seed + verify~~ (done)
 4. Five CRUD handlers with correct status codes
-5. Rate limiting middleware; run `go get golang.org/x/time/rate`
+5. ~~Rate limiting middleware~~ (done, hand-rolled token bucket)
 6. Pagination, sorting, filtering on `GET /inventory`
 7. Test edge cases (bad input, missing IDs, 429) with Postman/curl; finish this README
 8. Optional extras: Swagger (`swaggo/swag`) and in-memory caching

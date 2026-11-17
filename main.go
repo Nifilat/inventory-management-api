@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -30,8 +32,8 @@ type Item struct {
 // DATABASE
 // ============================================================
 
-// DB is the shared GORM handle used by the handlers.
-var DB *gorm.DB
+// db is the shared GORM handle used by the handlers.
+var db *gorm.DB
 
 // initDatabase connects to PostgreSQL, migrates the schema and seeds initial data.
 // The connection string (dsn) comes from DATABASE_DSN in .env.
@@ -44,19 +46,19 @@ func initDatabase() {
 	}
 
 	var err error
-	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Fatal("Failed to connect to the database! ", err)
 	}
 
-	DB.AutoMigrate(&Item{})
+	db.AutoMigrate(&Item{})
 	seedDatabase()
 }
 
 // seedDatabase seeds the database with 20 default items when the table is empty.
 func seedDatabase() {
 	var count int64
-	DB.Model(&Item{}).Count(&count)
+	db.Model(&Item{}).Count(&count)
 	if count > 0 {
 		log.Println("Database already contains data, skipping seeding.")
 		return
@@ -85,7 +87,7 @@ func seedDatabase() {
 		{ID: uuid.New().String(), Name: "VR Headset", Stock: 9, Price: 399.99},
 	}
 
-	if err := DB.Create(&items).Error; err != nil {
+	if err := db.Create(&items).Error; err != nil {
 		log.Fatal("Failed to seed database: ", err)
 	}
 	log.Println("Database seeded with 20 sample items.")
@@ -93,14 +95,14 @@ func seedDatabase() {
 
 // ============================================================
 // HANDLERS
-// One function per endpoint (rubric). All use GORM via DB and return JSON.
+// One function per endpoint (rubric). All use GORM via db and return JSON.
 // ============================================================
 
 // findItem loads an item by ID. On failure it writes the error response
 // (404 if not found, 500 for any other database error) and returns false.
 func findItem(c *gin.Context, id string) (Item, bool) {
 	var item Item
-	if err := DB.First(&item, "id = ?", id).Error; err != nil {
+	if err := db.First(&item, "id = ?", id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Item not found"})
 		} else {
@@ -119,7 +121,7 @@ func findItem(c *gin.Context, id string) (Item, bool) {
 // TODO(6): Return 400 for invalid query params (non-numeric limit, unknown sort field).
 func getItems(c *gin.Context) {
 	var items []Item
-	if err := DB.Find(&items).Error; err != nil {
+	if err := db.Find(&items).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch items"})
 		return
 	}
@@ -143,7 +145,7 @@ func createItem(c *gin.Context) {
 		return
 	}
 	newItem.ID = uuid.New().String()
-	if err := DB.Create(&newItem).Error; err != nil {
+	if err := db.Create(&newItem).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create item"})
 		return
 	}
@@ -165,7 +167,7 @@ func updateItem(c *gin.Context) {
 	}
 
 	item.Name, item.Stock, item.Price = input.Name, input.Stock, input.Price
-	if err := DB.Save(&item).Error; err != nil {
+	if err := db.Save(&item).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update item"})
 		return
 	}
@@ -178,7 +180,7 @@ func deleteItem(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if err := DB.Delete(&item).Error; err != nil {
+	if err := db.Delete(&item).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete item"})
 		return
 	}
@@ -189,15 +191,61 @@ func deleteItem(c *gin.Context) {
 // MIDDLEWARE
 // ============================================================
 
-// rateLimiter limits requests per client.
+// TokenBucket is a token bucket rate limiter: it holds up to `capacity` tokens
+// (the burst size) and gains one token every `rate`. Each request spends one token.
+type TokenBucket struct {
+	capacity   int
+	tokens     int
+	rate       time.Duration
+	lastFilled time.Time
+	mu         sync.Mutex
+}
+
+// NewTokenBucket returns a full bucket.
+func NewTokenBucket(capacity int, rate time.Duration) *TokenBucket {
+	return &TokenBucket{
+		capacity:   capacity,
+		tokens:     capacity,
+		rate:       rate,
+		lastFilled: time.Now(),
+	}
+}
+
+// Allow refills the bucket for the time elapsed, then spends a token if one is available.
+func (tb *TokenBucket) Allow() bool {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+
+	now := time.Now()
+	addTokens := int(now.Sub(tb.lastFilled) / tb.rate)
+
+	if addTokens > 0 {
+		tb.tokens += addTokens
+		if tb.tokens > tb.capacity {
+			tb.tokens = tb.capacity
+		}
+		// Advance only by the time actually credited so partial intervals aren't lost.
+		tb.lastFilled = tb.lastFilled.Add(time.Duration(addTokens) * tb.rate)
+	}
+
+	if tb.tokens > 0 {
+		tb.tokens--
+		return true
+	}
+	return false
+}
+
+// rateLimiter limits requests with one shared bucket: burst of 5, then 1 request per second.
 //
-// TODO(5): Run `go get golang.org/x/time/rate`, then create rate.NewLimiter(1, 5): 1 req/sec, burst of 5.
-// TODO(5): Decide scope: one global limiter (simplest) or one per client IP (map + mutex, c.ClientIP()).
-// TODO(5): If !limiter.Allow(), c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"}).
 // TODO(7): Test by firing >5 quick requests (curl loop) and confirm 429s, then recovery.
 func rateLimiter() gin.HandlerFunc {
+	limiter := NewTokenBucket(5, time.Second)
 	return func(c *gin.Context) {
-		c.Next() // pass-through until implemented
+		if !limiter.Allow() {
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
+		c.Next()
 	}
 }
 
@@ -207,7 +255,6 @@ func rateLimiter() gin.HandlerFunc {
 
 // setupRouter builds the Gin engine with middleware and all routes.
 //
-// TODO(5): Confirm rateLimiter is applied with router.Use() before the routes.
 // TODO(8, optional): Swagger UI route + swag annotations on handlers, then run `swag init`.
 // TODO(8, optional): Cache GET /inventory/:id in an in-memory map (RWMutex + TTL); invalidate on PUT/DELETE.
 func setupRouter() *gin.Engine {
