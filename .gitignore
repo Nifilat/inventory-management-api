@@ -1,0 +1,7 @@
+.env
+*.exe
+*.out
+/inventory-api
+.DS_Store
+.idea/
+.vscode/
