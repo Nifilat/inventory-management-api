@@ -142,7 +142,17 @@ for i in $(seq 1 8); do curl -s -o /dev/null -w "%{http_code} " localhost:8080/i
 # 200 200 200 200 200 429 429 429
 ```
 
-## Roadmap
+## API documentation (Swagger)
 
-- [ ] Swagger documentation (`swaggo/swag`)
-- [ ] In-memory caching for `GET /inventory/:id`
+With the server running, open http://localhost:8080/swagger/index.html for interactive docs where you can try each endpoint. The docs page is not rate limited.
+
+The docs are generated from the annotations above each handler in `main.go` and committed in `docs/`. After changing an annotation, regenerate them:
+
+```bash
+go install github.com/swaggo/swag/cmd/swag@latest
+swag init -g main.go
+```
+
+## Caching
+
+`GET /inventory/:id` is cached in memory. `PUT` and `DELETE` clear the item's cache entry, so reads are never stale. The cache is emptied when the server restarts.
