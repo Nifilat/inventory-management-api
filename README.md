@@ -22,7 +22,7 @@ main.go        Item model, database + seed, handlers, rate limiter, routes
 Requires **Go 1.23+** and **PostgreSQL**.
 
 ```bash
-git clone <this-repo> && cd inventory-api
+git clone https://github.com/Nifilat/inventory-management-api.git && cd inventory-management-api
 go mod tidy
 ```
 
